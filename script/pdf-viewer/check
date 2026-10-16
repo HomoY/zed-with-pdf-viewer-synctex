@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Runs every check the PDF viewer must pass before a push or a release, on this
+# machine: remote server parity, tests, Clippy, formatting and the visual scenarios.
+#
+# Usage: script/pdf-viewer/check
+#
+# The visual scenarios write screenshots to target/pdf-viewer-visual; look at them
+# after any rendering change.
+set -euo pipefail
+
+# Parsed as one block so editing this file while it runs can't change what runs.
+{
+cd "$(dirname "$0")/../.."
+
+# A toolchain's own cargo skips the library path rustup's proxy sets, so rust-objcopy
+# can't load libLLVM.dylib and every release build warns that stripping failed.
+if [[ "$(command -v cargo)" == */toolchains/*/bin/cargo ]]; then
+    echo "$(basename "$0"): run cargo through rustup's proxies, not $(command -v cargo)" >&2
+    echo "(Homebrew's rustup is keg-only: put /opt/homebrew/opt/rustup/bin on PATH)" >&2
+    exit 1
+fi
+
+features=()
+# Without Xcode's Metal compiler (a separate download since Xcode 26), GPUI
+# compiles its shaders when the app starts instead.
+if ! xcrun --find metal >/dev/null 2>&1; then
+    features=(--features gpui_platform/runtime_shaders)
+fi
+
+echo "==> Pdfium"
+script/pdf-viewer/fetch-pdfium
+
+echo "==> Remote server parity with upstream"
+script/pdf-viewer/check-remote-server-parity
+
+echo "==> Tests"
+cargo test --package pdf_viewer --package kkpdf-zed "${features[@]+"${features[@]}"}"
+
+echo "==> Clippy"
+cargo clippy --package pdf_viewer --package kkpdf-zed --all-targets "${features[@]+"${features[@]}"}" -- --deny warnings
+
+echo "==> Formatting"
+cargo fmt --package pdf_viewer --package kkpdf-zed -- --check
+
+echo "==> Visual scenarios"
+cargo build --package zed --bin zed_visual_test_runner --features visual-tests,gpui_platform/runtime_shaders
+VISUAL_TEST_ONLY=pdf_viewer UPDATE_BASELINE=1 VISUAL_TEST_OUTPUT_DIR=target/pdf-viewer-visual \
+    target/debug/zed_visual_test_runner
+echo "Screenshots are in target/pdf-viewer-visual"
+
+echo "All checks passed"
+exit
+}
