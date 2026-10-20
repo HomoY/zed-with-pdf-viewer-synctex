@@ -12,7 +12,7 @@ The PDF viewer itself, and everything else described below, comes from that fork
 ## SyncTeX
 
 - **PDF to LaTeX:** Cmd-click (Ctrl-click on Linux and Windows) a line in a PDF tab, and Zed opens the LaTeX file at that line, in a pane other than the PDF's.
-- **LaTeX to PDF:** run `pdf viewer: show in pdf` from the command palette in a LaTeX file, or bind it to a key.
+- **LaTeX to PDF:** press Cmd + Alt + J (Ctrl + Alt + J on Linux and Windows) in a LaTeX file, or run `pdf viewer: show in pdf` from the command palette.
   The PDF tab scrolls to the line under the cursor and highlights it for two seconds, without taking keyboard focus; if the PDF isn't open yet, it opens beside the editor.
 - Documents split into several files with `\input` or `\include` work: the PDF is looked up among the PDFs open in Zed, the PDF named after the file, and the PDFs with SyncTeX data in the file's folder and its parent folders up to the project root.
 - Remote projects over SSH, WSL and containers work too: `synctex` then runs on the remote machine, through your login shell there, so a TeX distribution installed in your home directory is found.
@@ -23,20 +23,20 @@ You need:
 - a PDF built with SyncTeX data, such as `latexmk -pdf -synctex=1`.
   The default build command of the [LaTeX extension](https://zed.dev/extensions/latex) does this.
 
-To jump to the PDF with a key, add a binding to your keymap (`zed: open keymap file`):
+Cmd + Alt + J is the forward-search key of LaTeX Workshop in VS Code.
+In LaTeX files it replaces Zed's own use of the key, toggling the workspace sidebar, which keeps working everywhere else.
+To use another key, bind `pdf_viewer::ShowInPdf` in your keymap (`zed: open keymap file`):
 
 ```json
 [
   {
     "context": "Editor && extension == tex",
     "bindings": {
-      "cmd-alt-j": "pdf_viewer::ShowInPdf"
+      "ctrl-cmd-j": "pdf_viewer::ShowInPdf"
     }
   }
 ]
 ```
-
-Cmd + Alt + J is the forward-search key of LaTeX Workshop in VS Code; in Zed it otherwise toggles the workspace sidebar, which this binding then does only outside LaTeX files.
 
 ## Features of the PDF viewer
 
@@ -76,6 +76,7 @@ It does not auto-update itself; new versions appear on the releases page.
 | Action | macOS | Linux and Windows |
 | --- | --- | --- |
 | Jump from the PDF to the LaTeX source | Cmd + click | Ctrl + click |
+| Jump from a LaTeX file to the PDF | Cmd + Alt + J | Ctrl + Alt + J |
 | Zoom in and out | Cmd + = and Cmd + - | Ctrl + = and Ctrl + - |
 | Fit width | Cmd + 0 | Ctrl + 0 |
 | Actual size | Cmd + 1 | Ctrl + 1 |

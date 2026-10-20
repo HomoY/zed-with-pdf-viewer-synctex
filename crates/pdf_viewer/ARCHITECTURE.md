@@ -32,7 +32,7 @@ Keep this list current; it is exactly the surface that can conflict when moving 
 | `crates/zed/src/main.rs` | `pdf_viewer::init(cx)` right after `image_viewer::init(cx)`. |
 | `crates/zed/src/zed.rs` | Adds `PdfViewToolbarControls` to every pane toolbar, right after the image viewer's toolbar. |
 | `crates/zed/src/visual_test_runner.rs` | `pdf_viewer::init`, writes `sample.pdf` into the test project, and `run_pdf_viewer_visual_tests`, selected with `VISUAL_TEST_ONLY=pdf_viewer`. |
-| `assets/keymaps/default-{macos,linux,windows}.json` | One `"context": "PdfViewer"` block each, placed before the `ImageViewer` block. |
+| `assets/keymaps/default-{macos,linux,windows}.json` | One `"context": "PdfViewer"` block each, placed before the `ImageViewer` block, followed by an `"Editor && extension == tex"` block binding `pdf_viewer::ShowInPdf` to Cmd-Alt-J (Ctrl-Alt-J on Linux and Windows). |
 | `crates/remote/src/transport.rs` | `remote_server_release`: with `ZED_REMOTE_SERVER_RELEASE_CHANNEL` set at build time, install the official server of that channel, named after the upstream version only. See "Remote development" in MAINTAINING.md. |
 | `crates/remote/src/transport/{ssh,wsl,docker}.rs` | Call `remote_server_release` where they picked the release channel and version of the server to install. |
 | `.github/README.md`, `script/pdf-viewer/*`, `.claude/*` | Fork-only files; upstream never has files at these paths. |
@@ -177,7 +177,7 @@ Unknown JSON fields are ignored, so older saved states keep loading.
 Jumping between LaTeX sources and the PDF runs the `synctex` command-line tool from the user's TeX distribution, found on `PATH` or in the usual TeX install directories, rather than parsing `.synctex.gz` files in Rust.
 Both directions use the PDF-point coordinates of `PageAnchor`, which are also SyncTeX's.
 
-- Source to PDF: `pdf_viewer::ShowInPdf` is registered on every workspace, so it works from a focused editor.
+- Source to PDF: `pdf_viewer::ShowInPdf` is registered on every workspace, so it works from a focused editor, and is bound to Cmd-Alt-J (Ctrl-Alt-J) in LaTeX files.
   It takes the cursor line of the active editor and tries, in order, PDFs open in a pane, the PDF named after the source file, and PDFs with SyncTeX data in the source's directory and its parents up to the worktree root (newest first), so section files included from a main document work.
   The first PDF with a match is brought to the front of its pane, or opened beside the editor, without taking focus; `PdfView::reveal_boxes` scrolls the first box a third of the way down unless it is already visible and highlights the boxes for two seconds.
 - PDF to source: Cmd-click (Ctrl-click on Linux and Windows) on a page runs `synctex edit` for that point and opens the line in a pane that already shows the file, or else in a pane other than the PDF's.

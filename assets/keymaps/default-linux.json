@@ -1634,6 +1634,13 @@
     },
   },
   {
+    // Jumps from the line under the cursor to the PDF compiled from it (SyncTeX).
+    "context": "Editor && extension == tex",
+    "bindings": {
+      "ctrl-alt-j": "pdf_viewer::ShowInPdf",
+    },
+  },
+  {
     "context": "ImageViewer",
     "bindings": {
       "ctrl-=": "image_viewer::ZoomIn",
