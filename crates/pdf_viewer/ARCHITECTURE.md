@@ -105,6 +105,7 @@ Bundled copies win over system copies so a released app always uses the Pdfium v
 | `layout.rs` | Pure geometry: page positions, zoom modes, page anchors, the tile grid. Unit tested without GPUI windows. |
 | `scroll.rs` | `PdfScrollHandle`, the scroll state shared with Zed's scrollbars. |
 | `toolbar.rs` | `PdfViewToolbarControls`: page number and zoom editors, navigation and zoom buttons. |
+| `synctex.rs` | SyncTeX: the `ShowInPdf` workspace action (source to PDF), opening the source line of a Cmd-click (PDF to source), and parsing the `synctex` tool's output. |
 | `persistence.rs` | The `pdf_viewers` table in Zed's workspace database. |
 | `test_support.rs` | Generated PDFs for tests and visual tests (behind `test-support`). |
 | `pdf_view_tests.rs` | GPUI tests that drive a real `PdfView` with the real Pdfium worker. |
@@ -170,6 +171,20 @@ Unknown JSON fields are ignored, so older saved states keep loading.
   Mapping by HSL lightness instead of perceived brightness left dark blue headings unreadable.
 - **Dev release channel for the app.**
   Release builds of this fork use Zed's `dev` channel so Zed's auto-updater never replaces them with stock Zed, with their own bundle identifier so they install next to the official app.
+
+### SyncTeX
+
+Jumping between LaTeX sources and the PDF runs the `synctex` command-line tool from the user's TeX distribution, found on `PATH` or in the usual TeX install directories, rather than parsing `.synctex.gz` files in Rust.
+Both directions use the PDF-point coordinates of `PageAnchor`, which are also SyncTeX's.
+
+- Source to PDF: `pdf_viewer::ShowInPdf` is registered on every workspace, so it works from a focused editor.
+  It takes the cursor line of the active editor and tries, in order, PDFs open in a pane, the PDF named after the source file, and PDFs with SyncTeX data in the source's directory and its parents up to the worktree root (newest first), so section files included from a main document work.
+  The first PDF with a match is brought to the front of its pane, or opened beside the editor, without taking focus; `PdfView::reveal_boxes` scrolls the first box a third of the way down unless it is already visible and highlights the boxes for two seconds.
+- PDF to source: Cmd-click (Ctrl-click on Linux and Windows) on a page runs `synctex edit` for that point and opens the line in a pane that already shows the file, or else in a pane other than the PDF's.
+  `PdfView` keeps a weak handle to its workspace from `Item::added_to_workspace` for this.
+
+In remote projects (SSH, WSL, containers) `synctex` runs on the remote machine: `SyncTexCommand` asks the project's `RemoteClient` to build the command, as terminals and tasks do, and runs it through the user's login shell there, since TeX distributions installed in a home directory usually add themselves to `PATH` only in login shells.
+The search for PDFs then uses the worktree listing (`ProjectFiles`) instead of the local disk (`LocalFiles`), so the remote server stays unchanged.
 
 ## Known limitations and ideas
 

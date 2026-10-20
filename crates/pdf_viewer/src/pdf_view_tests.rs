@@ -488,3 +488,78 @@ async fn reopens_a_pdf_in_a_remote_project_from_its_saved_path(
         assert_eq!(project.read(cx).worktrees(cx).count(), 1);
     });
 }
+
+#[gpui::test]
+async fn revealing_a_synctex_box_scrolls_to_it_and_highlights_it(cx: &mut TestAppContext) {
+    let Some((view, cx)) = open_pdf_view(8, cx).await else {
+        return;
+    };
+    cx.simulate_resize(size(px(900.), px(700.)));
+    draw_until_rendered(&view, cx);
+
+    let pdf_box = PdfBox {
+        page_index: 5,
+        x: 72.,
+        y: 300.,
+        width: 200.,
+        height: 10.,
+    };
+    view.update(cx, |view, cx| view.reveal_boxes(vec![pdf_box], cx));
+    draw(cx);
+    let scroll_position = cx.read(|cx| {
+        let view = view.read(cx);
+        let layout = view.layout.as_ref().unwrap();
+        let position = layout
+            .position_of(PageAnchor {
+                page_index: 5,
+                x: 72.,
+                y: 300.,
+            })
+            .unwrap();
+        // The box sits a third of the way down the view.
+        let offset = position.y - view.scroll.scroll_position().y;
+        assert!((offset - view.scroll.viewport_bounds().size.height / 3.).abs() < px(1.));
+        assert_eq!(view.highlight, vec![pdf_box]);
+        view.scroll.scroll_position()
+    });
+
+    // A box that is already on screen is highlighted without scrolling.
+    let nearby = PdfBox { y: 330., ..pdf_box };
+    view.update(cx, |view, cx| view.reveal_boxes(vec![nearby], cx));
+    draw(cx);
+    cx.read(|cx| {
+        let view = view.read(cx);
+        assert_eq!(view.scroll.scroll_position(), scroll_position);
+        assert_eq!(view.highlight, vec![nearby]);
+    });
+
+    cx.executor().advance_clock(HIGHLIGHT_DURATION);
+    draw(cx);
+    cx.read(|cx| assert!(view.read(cx).highlight.is_empty()));
+}
+
+#[gpui::test]
+async fn maps_a_click_to_a_point_on_the_page(cx: &mut TestAppContext) {
+    let Some((view, cx)) = open_pdf_view(4, cx).await else {
+        return;
+    };
+    cx.simulate_resize(size(px(900.), px(700.)));
+    draw_until_rendered(&view, cx);
+    view.update(cx, |view, cx| view.go_to_page(2, cx));
+    draw(cx);
+
+    cx.read(|cx| {
+        let view = view.read(cx);
+        let layout = view.layout.as_ref().unwrap();
+        let viewport = view.scroll.viewport_bounds();
+        let page = layout.pages[2];
+        // 30 points right of and 40 points below the top-left corner of page 3.
+        let click = viewport.origin - view.scroll.scroll_position()
+            + page.origin
+            + point(px(30. * layout.zoom), px(40. * layout.zoom));
+        let anchor = view.page_point_at(click).unwrap();
+        assert_eq!(anchor.page_index, 2);
+        assert!((anchor.x - 30.).abs() < 0.01);
+        assert!((anchor.y - 40.).abs() < 0.01);
+    });
+}

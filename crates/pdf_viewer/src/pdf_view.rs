@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -40,6 +40,7 @@ use crate::{
     pdf_item::{PdfItem, PdfItemEvent},
     persistence::PdfViewerDb,
     scroll::PdfScrollHandle,
+    synctex::{self, PdfBox},
 };
 
 actions!(
@@ -86,6 +87,10 @@ const RASTER_SETTLE: Duration = Duration::from_millis(120);
 const TILE_CACHE_BYTES: usize = 384 * 1024 * 1024;
 /// Delay before persisting the scroll position after the user stops scrolling.
 const SERIALIZE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// How long the boxes found by a SyncTeX jump stay highlighted.
+const HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
+/// Space around a highlighted box, in points, so descenders are covered too.
+const HIGHLIGHT_PADDING: f32 = 2.;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TileKey {
@@ -188,6 +193,10 @@ pub struct PdfView {
     drag_position: Option<Point<Pixels>>,
     tiles: TileCache,
     page_edit_requested: bool,
+    workspace: Option<WeakEntity<Workspace>>,
+    /// Boxes shown by a SyncTeX jump until `highlight_task` clears them.
+    highlight: Vec<PdfBox>,
+    highlight_task: Option<Task<()>>,
 }
 
 impl PdfView {
@@ -225,7 +234,16 @@ impl PdfView {
             drag_position: None,
             tiles: TileCache::default(),
             page_edit_requested: false,
+            workspace: None,
+            highlight: Vec::new(),
+            highlight_task: None,
         }
+    }
+
+    /// Absolute path of the PDF on the machine that has it, which is a remote machine
+    /// in remote projects.
+    pub fn path_on_host(&self, cx: &App) -> PathBuf {
+        self.pdf_item.read(cx).path_on_host(cx)
     }
 
     fn on_pdf_item_event(
@@ -358,6 +376,99 @@ impl PdfView {
         cx.notify();
     }
 
+    /// Highlights `boxes` for a moment, first scrolling the first one a third of the way
+    /// down the view unless it is already fully visible.
+    pub fn reveal_boxes(&mut self, boxes: Vec<PdfBox>, cx: &mut Context<Self>) {
+        let Some(first) = boxes.first().copied() else {
+            return;
+        };
+        let top_left = PageAnchor {
+            page_index: first.page_index,
+            x: first.x,
+            y: first.y,
+        };
+        let bottom_right = PageAnchor {
+            x: first.x + first.width,
+            y: first.y + first.height,
+            ..top_left
+        };
+        let viewport = self.scroll.viewport_bounds().size;
+        let visible = Bounds::new(self.scroll.scroll_position(), viewport);
+        let on_screen = self.layout.as_ref().is_some_and(|layout| {
+            [top_left, bottom_right].into_iter().all(|anchor| {
+                layout
+                    .position_of(anchor)
+                    .is_some_and(|position| visible.contains(&position))
+            })
+        });
+        if !on_screen {
+            // Applied after layout, so it also works for a view that was just opened.
+            self.pending_anchor = Some((
+                top_left,
+                point(viewport.width / 10., (viewport.height / 3.).max(px(48.))),
+            ));
+            self.state_changed(cx);
+        }
+        self.highlight = boxes;
+        self.highlight_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HIGHLIGHT_DURATION).await;
+            this.update(cx, |this, cx| {
+                this.highlight.clear();
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The page and the point on it, in PDF points, under a window position.
+    fn page_point_at(&self, window_point: Point<Pixels>) -> Option<PageAnchor> {
+        let viewport = self.scroll.viewport_bounds();
+        self.layout
+            .as_ref()?
+            .anchor_at(self.scroll.scroll_position() + (window_point - viewport.origin))
+    }
+
+    /// Inverse SyncTeX search: opens the source line typeset at a window position.
+    fn show_source_at(
+        &mut self,
+        window_point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(anchor), Some(workspace)) =
+            (self.page_point_at(window_point), self.workspace.clone())
+        else {
+            return;
+        };
+        let remote_client = self.project.read(cx).remote_client();
+        let command = synctex::SyncTexCommand::edit(
+            remote_client
+                .as_ref()
+                .map(|remote_client| remote_client.read(cx)),
+            &self.path_on_host(cx),
+            anchor.page_index,
+            anchor.x,
+            anchor.y,
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            let location = match command {
+                Ok(command) => {
+                    cx.background_spawn(async move {
+                        let output = command.run().await?;
+                        Ok(synctex::parse_edit_output(&output))
+                    })
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            workspace.update_in(cx, |workspace, window, cx| {
+                synctex::open_source(workspace, location, window, cx)
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
     fn next_page(&mut self, _: &NextPage, _: &mut Window, cx: &mut Context<Self>) {
         self.go_to_page(self.current_page() + 1, cx);
     }
@@ -449,6 +560,10 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        if event.button == MouseButton::Left && event.modifiers.secondary() {
+            self.show_source_at(event.position, window, cx);
+            return;
+        }
         self.drag_position = Some(event.position);
         cx.notify();
     }
@@ -687,12 +802,32 @@ impl PdfView {
                 ));
             }
             images.sort_by_key(|(order, ..)| *order);
+            let highlights = self
+                .highlight
+                .iter()
+                .filter(|pdf_box| pdf_box.page_index == page_index)
+                .map(|pdf_box| {
+                    let to_pixels = |points: f32| px(points * layout.zoom);
+                    Bounds::new(
+                        page_origin
+                            + point(
+                                to_pixels(pdf_box.x - HIGHLIGHT_PADDING),
+                                to_pixels(pdf_box.y - HIGHLIGHT_PADDING),
+                            ),
+                        size(
+                            to_pixels(pdf_box.width + 2. * HIGHLIGHT_PADDING),
+                            to_pixels(pdf_box.height + 2. * HIGHLIGHT_PADDING),
+                        ),
+                    )
+                })
+                .collect();
             pages.push(PagePaint {
                 bounds: page_rect,
                 images: images
                     .into_iter()
                     .map(|(_, _, bounds, image)| (bounds, image))
                     .collect(),
+                highlights,
             });
         }
 
@@ -763,6 +898,8 @@ fn snap_point(position: Point<Pixels>, scale_factor: f32) -> Point<Pixels> {
 struct PagePaint {
     bounds: Bounds<Pixels>,
     images: Vec<(Bounds<Pixels>, Arc<RenderImage>)>,
+    /// Boxes highlighted by a SyncTeX jump.
+    highlights: Vec<Bounds<Pixels>>,
 }
 
 struct PagesPaint {
@@ -863,6 +1000,9 @@ impl Element for PagesElement {
                                     false,
                                 )
                                 .log_err();
+                        }
+                        for highlight in &page.highlights {
+                            window.paint_quad(fill(*highlight, hsla(50. / 360., 1., 0.5, 0.35)));
                         }
                     },
                 );
@@ -965,6 +1105,15 @@ impl Item for PdfView {
         f: &mut dyn FnMut(gpui::EntityId, &dyn project::ProjectItem),
     ) {
         f(self.pdf_item.entity_id(), self.pdf_item.read(cx))
+    }
+
+    fn added_to_workspace(
+        &mut self,
+        workspace: &mut Workspace,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.workspace = Some(workspace.weak_handle());
     }
 
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
