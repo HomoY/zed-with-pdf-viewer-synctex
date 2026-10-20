@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds "Zed with PDF Viewer.app" and a DMG for macOS.
+# Builds "Zed with PDF Viewer (SyncTeX).app" and a DMG for macOS.
 #
 # Usage: script/pdf-viewer/bundle-mac [-i] [target-triple]
 #   -i  Also install the app into /Applications.
@@ -18,8 +18,8 @@ set -euo pipefail
 # Parsed as one block so editing this file while it runs can't change what runs.
 {
 
-APP_NAME="Zed with PDF Viewer"
-BUNDLE_IDENTIFIER="io.github.tendont52.zed-with-pdf-viewer"
+APP_NAME="Zed with PDF Viewer (SyncTeX)"
+BUNDLE_IDENTIFIER="io.github.homoy.zed-with-pdf-viewer-synctex"
 GIT_VERSION="v2.43.3"
 GIT_VERSION_SHA="fa29823"
 
@@ -163,7 +163,7 @@ codesign --verify --deep --strict "${app_path}"
 # passes the tag; other builds use the tag on HEAD, or the Zed version when HEAD has none.
 release_tag="${PDF_VIEWER_RELEASE_TAG:-$(git describe --tags --exact-match --match 'v*-pdf.*' HEAD 2>/dev/null || true)}"
 release_name="${release_tag#v}"
-dmg_name="Zed-with-PDF-Viewer-${release_name:-${version}}-${arch_suffix}.dmg"
+dmg_name="Zed-with-PDF-Viewer-SyncTeX-${release_name:-${version}}-${arch_suffix}.dmg"
 dmg_source="${output_dir}/dmg-${arch_suffix}"
 rm -rf "${dmg_source}"
 mkdir -p "${dmg_source}"

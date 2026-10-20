@@ -78,12 +78,12 @@ script/pdf-viewer/bundle-mac -i         # also install into /Applications
 script/pdf-viewer/bundle-mac x86_64-apple-darwin
 ```
 
-The script builds `zed` and `cli` in release mode on the dev channel, bundles them with Zed's fork of `cargo-bundle` under the name "Zed with PDF Viewer" and identifier `io.github.tendont52.zed-with-pdf-viewer`, copies Pdfium into `Contents/Frameworks`, adds the same `git` binary official builds ship, signs ad-hoc, and writes `target/pdf-viewer/Zed-with-PDF-Viewer-<release>-<arch>.dmg`.
+The script builds `zed` and `cli` in release mode on the dev channel, bundles them with Zed's fork of `cargo-bundle` under the name "Zed with PDF Viewer (SyncTeX)" and identifier `io.github.homoy.zed-with-pdf-viewer-synctex`, copies Pdfium into `Contents/Frameworks`, adds the same `git` binary official builds ship, signs ad-hoc, and writes `target/pdf-viewer/Zed-with-PDF-Viewer-SyncTeX-<release>-<arch>.dmg`.
 `<release>` is the fork release, such as `1.24.2-pdf.3`, taken from `PDF_VIEWER_RELEASE_TAG` or the release tag on HEAD, and the Zed version when HEAD has no release tag.
 Release profile overrides (no LTO, 16 codegen units, no debug info) make a release build several times faster; override the `CARGO_PROFILE_RELEASE_*` variables to change that.
 
 The app is ad-hoc signed and not notarized, because notarization needs a paid Apple Developer account.
-macOS therefore quarantines downloaded copies; users clear it with "Open Anyway" in System Settings, Privacy & Security, or with `xattr -dr com.apple.quarantine "/Applications/Zed with PDF Viewer.app"`.
+macOS therefore quarantines downloaded copies; users clear it with "Open Anyway" in System Settings, Privacy & Security, or with `xattr -dr com.apple.quarantine "/Applications/Zed with PDF Viewer (SyncTeX).app"`.
 On recent macOS that command fails with "Operation not permitted" until the terminal is allowed under Privacy & Security, App Management, because changing apps in /Applications is protected.
 With a Developer ID, signing and notarizing would follow upstream's `script/bundle-mac`.
 

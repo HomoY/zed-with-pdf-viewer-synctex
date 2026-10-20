@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Builds "Zed with PDF Viewer" on this machine and publishes it as a GitHub release.
+# Builds "Zed with PDF Viewer (SyncTeX)" on this machine and publishes it as a GitHub release.
 #
-# Usage: script/pdf-viewer/release [--dry-run] [vX.Y.Z-pdf.N]
-#   vX.Y.Z-pdf.N  The release tag. Defaults to the next fork release of the Zed
-#                 version the branch is based on, for example v1.24.2-pdf.4.
+# Usage: script/pdf-viewer/release [--dry-run] vX.Y.Z-pdf.N-synctex.M
+#   vX.Y.Z-pdf.N-synctex.M  The release tag: the zed-with-pdf-viewer release this
+#                 is based on plus a SyncTeX release number, for example
+#                 v1.24.2-pdf.4-synctex.1.
 #   --dry-run     Build and check everything, print the release notes, but don't
 #                 tag or publish anything.
 #
@@ -46,17 +47,10 @@ if [[ "${dry_run}" == false ]]; then
 fi
 
 base="$(script/pdf-viewer/upstream-version)"
-if [[ -z "${tag}" ]]; then
-    latest_for_base="$(git tag --list "${base}-pdf.*" --sort=-v:refname | head -n 1)"
-    if [[ -n "${latest_for_base}" ]]; then
-        tag="${base}-pdf.$((${latest_for_base##*-pdf.} + 1))"
-    else
-        tag="${base}-pdf.1"
-    fi
-fi
-[[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-pdf\.[0-9]+$ ]] || fail "${tag} is not a tag like v1.24.2-pdf.1"
+[[ -n "${tag}" ]] || fail "give the release tag, for example ${base}-pdf.4-synctex.1"
+[[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-pdf\.[0-9]+-synctex\.[0-9]+$ ]] || fail "${tag} is not a tag like v1.24.2-pdf.4-synctex.1"
 [[ "${tag%-pdf.*}" == "${base}" ]] || fail "${tag} doesn't match the Zed release the branch is on (${base})"
-previous="$(git tag --list 'v*-pdf.*' --sort=-v:refname | grep -vxF "${tag}" | head -n 1 || true)"
+previous="$(git tag --list 'v*-synctex.*' --sort=-v:refname | grep -vxF "${tag}" | head -n 1 || true)"
 if [[ "${dry_run}" == false ]]; then
     ! git rev-parse --quiet --verify "refs/tags/${tag}" >/dev/null || fail "tag ${tag} already exists"
     command -v gh >/dev/null || fail "install the GitHub CLI (gh) first"
@@ -70,7 +64,7 @@ targets=(aarch64-apple-darwin x86_64-apple-darwin)
 dmgs=()
 for target in "${targets[@]}"; do
     PDF_VIEWER_RELEASE_TAG="${tag}" script/pdf-viewer/bundle-mac "${target}"
-    dmgs+=("target/pdf-viewer/Zed-with-PDF-Viewer-${tag#v}-${target%%-*}.dmg")
+    dmgs+=("target/pdf-viewer/Zed-with-PDF-Viewer-SyncTeX-${tag#v}-${target%%-*}.dmg")
 done
 
 echo "==> Verifying the DMGs"
@@ -80,7 +74,7 @@ for index in "${!targets[@]}"; do
     [[ "${architecture}" == aarch64 ]] && architecture=arm64
     mount_point="$(mktemp -d)"
     hdiutil attach -nobrowse -readonly -quiet -mountpoint "${mount_point}" "${dmg}"
-    app="${mount_point}/Zed with PDF Viewer.app"
+    app="${mount_point}/Zed with PDF Viewer (SyncTeX).app"
     verified=true
     codesign --verify --deep --strict "${app}" || verified=false
     [[ -f "${app}/Contents/Frameworks/libpdfium.dylib" ]] || verified=false
@@ -94,7 +88,7 @@ done
 
 notes="$(mktemp)"
 {
-    echo "Zed ${base#v} with a built-in PDF viewer."
+    echo "Zed ${base#v} with a built-in PDF viewer and SyncTeX for LaTeX, based on TendonT52/zed-with-pdf-viewer."
     echo
     # Moving to a new Zed version, or reorganizing the fork's commits, rewrites them,
     # so "since the previous release" is only listed when that release is an ancestor.
@@ -121,7 +115,7 @@ notes="$(mktemp)"
     echo "Click **Done** on the warning, then click **Open Anyway** in System Settings, Privacy & Security, or run"
     echo
     echo '```'
-    echo 'xattr -dr com.apple.quarantine "/Applications/Zed with PDF Viewer.app"'
+    echo 'xattr -dr com.apple.quarantine "/Applications/Zed with PDF Viewer (SyncTeX).app"'
     echo '```'
     echo
     echo "If that prints \"Operation not permitted\", allow your terminal under Privacy & Security, App Management, and run it again."
@@ -142,7 +136,7 @@ git tag "${tag}"
 git push origin "refs/tags/${tag}"
 gh release create "${tag}" "${dmgs[@]}" \
     --verify-tag \
-    --title "Zed with PDF Viewer ${tag#v}" \
+    --title "Zed with PDF Viewer (SyncTeX) ${tag#v}" \
     --notes-file "${notes}" \
     --latest
 rm -f "${notes}"
