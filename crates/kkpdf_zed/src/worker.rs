@@ -58,6 +58,32 @@ pub struct RenderedTile {
     pub bgra: Vec<u8>,
 }
 
+/// Where a link leads.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkTarget {
+    /// A position in the same document, in points from the top-left corner of the
+    /// page. A missing coordinate means the link doesn't say where to scroll on that axis.
+    Page {
+        page_index: usize,
+        x: Option<f32>,
+        y: Option<f32>,
+    },
+    /// A web address or other URI.
+    Uri(String),
+}
+
+/// A clickable link on a page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageLink {
+    /// Left edge, in points from the page's left edge.
+    pub x: f32,
+    /// Top edge, in points from the page's top edge.
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub target: LinkTarget,
+}
+
 /// Cancels the associated render job when dropped, unless it already ran.
 #[derive(Debug)]
 pub struct RenderTicket {
@@ -79,6 +105,11 @@ enum Job {
         reply: Reply<DocumentInfo>,
     },
     Close(DocumentId),
+    Links {
+        document: DocumentId,
+        page_index: usize,
+        reply: Reply<Vec<PageLink>>,
+    },
     Render {
         request: TileRequest,
         cancelled: Arc<AtomicBool>,
@@ -88,7 +119,7 @@ enum Job {
 
 #[derive(Default)]
 struct Queue {
-    /// Open and close jobs, served first and in order.
+    /// Open, close and link jobs, served first and in order.
     control: VecDeque<Job>,
     /// Render jobs, served newest-first.
     renders: Vec<Job>,
@@ -155,6 +186,20 @@ impl PdfWorker {
     /// Releases a document opened with [`PdfWorker::open`].
     pub fn close(&self, document: DocumentId) {
         self.push_control(Job::Close(document));
+    }
+
+    /// Reads the links on a page and where they lead.
+    pub fn links(
+        &self,
+        document: DocumentId,
+        page_index: usize,
+        reply: impl FnOnce(Result<Vec<PageLink>>) + Send + 'static,
+    ) {
+        self.push_control(Job::Links {
+            document,
+            page_index,
+            reply: Box::new(reply),
+        });
     }
 
     /// Queues a tile render. Dropping the returned ticket cancels it if it hasn't run yet.
@@ -257,6 +302,17 @@ fn run(pdfium: &Pdfium, queue: &(Mutex<Queue>, Condvar)) {
             Job::Close(id) => {
                 documents.remove(&id);
             }
+            Job::Links {
+                document,
+                page_index,
+                reply,
+            } => {
+                let result = documents
+                    .get_mut(&document)
+                    .context("document is not open")
+                    .and_then(|document| page_links(document, page_index));
+                reply(result);
+            }
             Job::Render {
                 request,
                 cancelled,
@@ -351,4 +407,141 @@ fn render_tile(document: &mut OpenDocument<'_>, request: &TileRequest) -> Result
         height,
         bgra,
     })
+}
+
+/// Converts a point in a page's own coordinate system (points from the bottom-left
+/// corner of its media box) to points from the top-left corner of the page as shown,
+/// the coordinates tiles are rendered in.
+fn to_display_points(page: &PdfPage<'_>, x: f32, y: f32) -> Option<(f32, f32)> {
+    // Pdfium converts to whole device pixels, so convert at a finer resolution.
+    const SUBDIVISIONS: f32 = 16.;
+    let config = PdfRenderConfig::new().set_fixed_size(
+        (page.width().value * SUBDIVISIONS).round() as i32,
+        (page.height().value * SUBDIVISIONS).round() as i32,
+    );
+    let (x, y) = page
+        .points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &config)
+        .ok()?;
+    Some((x as f32 / SUBDIVISIONS, y as f32 / SUBDIVISIONS))
+}
+
+/// A link target before its coordinates are converted, which needs the target page.
+enum PageCoordinates {
+    Page {
+        page_index: usize,
+        x: Option<f32>,
+        y: Option<f32>,
+    },
+    Uri(String),
+}
+
+fn page_links(document: &mut OpenDocument<'_>, page_index: usize) -> Result<Vec<PageLink>> {
+    let mut found = Vec::new();
+    {
+        let page = document.page(page_index)?;
+        for link in page.links().iter() {
+            let Ok(rect) = link.rect() else {
+                continue;
+            };
+            let (Some((left, top)), Some((right, bottom))) = (
+                to_display_points(page, rect.left().value, rect.top().value),
+                to_display_points(page, rect.right().value, rect.bottom().value),
+            ) else {
+                continue;
+            };
+            let action = link.action();
+            let action_destination = match &action {
+                Some(PdfAction::LocalDestination(action)) => action.destination().ok(),
+                _ => None,
+            };
+            let destination = link.destination().or(action_destination);
+            let target = if let Some(destination) = destination {
+                let Ok(target_page) = destination.page_index() else {
+                    continue;
+                };
+                let (x, y) = match destination.view_settings() {
+                    Ok(PdfDestinationViewSettings::SpecificCoordinatesAndZoom(x, y, _)) => {
+                        (x.map(|x| x.value), y.map(|y| y.value))
+                    }
+                    Ok(
+                        PdfDestinationViewSettings::FitPageHorizontallyToWindow(y)
+                        | PdfDestinationViewSettings::FitBoundsHorizontallyToWindow(y),
+                    ) => (None, y.map(|y| y.value)),
+                    Ok(
+                        PdfDestinationViewSettings::FitPageVerticallyToWindow(x)
+                        | PdfDestinationViewSettings::FitBoundsVerticallyToWindow(x),
+                    ) => (x.map(|x| x.value), None),
+                    Ok(PdfDestinationViewSettings::FitPageToRectangle(rect)) => {
+                        (Some(rect.left().value), Some(rect.top().value))
+                    }
+                    _ => (None, None),
+                };
+                PageCoordinates::Page {
+                    page_index: target_page as usize,
+                    x,
+                    y,
+                }
+            } else if let Some(PdfAction::Uri(action)) = &action {
+                match action.uri() {
+                    Ok(uri) if !uri.trim().is_empty() => {
+                        PageCoordinates::Uri(uri.trim().to_string())
+                    }
+                    _ => continue,
+                }
+            } else {
+                continue;
+            };
+            found.push((
+                left.min(right),
+                top.min(bottom),
+                (right - left).abs(),
+                (bottom - top).abs(),
+                target,
+            ));
+        }
+    }
+
+    // Destinations are in the coordinates of the page they point to.
+    let page_count = document.document.pages().len() as usize;
+    let mut links = Vec::with_capacity(found.len());
+    for (x, y, width, height, target) in found {
+        let target = match target {
+            PageCoordinates::Uri(uri) => LinkTarget::Uri(uri),
+            PageCoordinates::Page { page_index, .. } if page_index >= page_count => continue,
+            PageCoordinates::Page {
+                page_index,
+                x: None,
+                y: None,
+            } => LinkTarget::Page {
+                page_index,
+                x: None,
+                y: None,
+            },
+            PageCoordinates::Page {
+                page_index,
+                x: target_x,
+                y: target_y,
+            } => {
+                // On an unrotated page each display coordinate depends only on the
+                // matching page coordinate, so a missing one can be filled in and dropped.
+                let converted = document.page(page_index).ok().and_then(|page| {
+                    to_display_points(page, target_x.unwrap_or(0.), target_y.unwrap_or(0.))
+                });
+                let (display_x, display_y) = converted.unzip();
+                LinkTarget::Page {
+                    page_index,
+                    x: target_x.and(display_x),
+                    y: target_y.and(display_y),
+                }
+            }
+        };
+        links.push(PageLink {
+            x,
+            y,
+            width,
+            height,
+            target,
+        });
+    }
+    Ok(links)
 }

@@ -18,7 +18,7 @@ use util::rel_path::rel_path;
 use super::*;
 use crate::layout::{CONTENT_PADDING, ZoomMode};
 use crate::pdf_item::PdfItemEvent;
-use crate::test_support::multi_page_pdf;
+use crate::test_support::{linked_pdf, multi_page_pdf};
 
 fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -33,6 +33,14 @@ async fn open_pdf_view(
     pages: usize,
     cx: &mut TestAppContext,
 ) -> Option<(Entity<PdfView>, &mut VisualTestContext)> {
+    open_pdf_bytes(multi_page_pdf(pages), cx).await
+}
+
+/// Opens the given PDF in a `PdfView`, or returns `None` when Pdfium isn't installed.
+async fn open_pdf_bytes(
+    bytes: Vec<u8>,
+    cx: &mut TestAppContext,
+) -> Option<(Entity<PdfView>, &mut VisualTestContext)> {
     if let Err(error) = kkpdf_zed::PdfWorker::global() {
         eprintln!("skipping: {error}");
         return None;
@@ -43,7 +51,7 @@ async fn open_pdf_view(
 
     let fs = FakeFs::new(cx.executor());
     fs.create_dir(Path::new("/root")).await.unwrap();
-    fs.insert_file("/root/doc.pdf", multi_page_pdf(pages)).await;
+    fs.insert_file("/root/doc.pdf", bytes).await;
     let project = Project::test(fs, [Path::new("/root")], cx).await;
     let worktree_id = cx.update(|cx| project.read(cx).worktrees(cx).next().unwrap().read(cx).id());
     let path = ProjectPath {
@@ -561,5 +569,132 @@ async fn maps_a_click_to_a_point_on_the_page(cx: &mut TestAppContext) {
         assert_eq!(anchor.page_index, 2);
         assert!((anchor.x - 30.).abs() < 0.01);
         assert!((anchor.y - 40.).abs() < 0.01);
+    });
+}
+
+#[gpui::test]
+async fn reads_links_and_their_targets(cx: &mut TestAppContext) {
+    let Ok(worker) = kkpdf_zed::PdfWorker::global() else {
+        eprintln!("skipping: Pdfium isn't installed");
+        return;
+    };
+    cx.executor().allow_parking();
+    let (tx, rx) = futures::channel::oneshot::channel();
+    worker.open(linked_pdf(), move |result| {
+        tx.send(result).ok();
+    });
+    let document = rx.await.unwrap().unwrap();
+    let links_on = |page_index| {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        worker.links(document.id, page_index, move |result| {
+            tx.send(result).ok();
+        });
+        rx
+    };
+    let close = |a: f32, b: f32| (a - b).abs() < 0.1;
+
+    let mut links = links_on(0).await.unwrap().unwrap();
+    links.sort_by(|a, b| a.y.total_cmp(&b.y));
+    assert_eq!(links.len(), 3);
+    // A named destination, as `\eqref` writes it: page 2, 72 points from the left
+    // and 400 points up, so 792 - 400 = 392 points from the top.
+    assert!(close(links[0].x, 100.) && close(links[0].y, 172.));
+    assert!(close(links[0].width, 100.) && close(links[0].height, 20.));
+    let LinkTarget::Page { page_index, x, y } = links[0].target else {
+        panic!(
+            "expected a link into the document, got {:?}",
+            links[0].target
+        );
+    };
+    assert_eq!(page_index, 1);
+    assert!(close(x.unwrap(), 72.) && close(y.unwrap(), 392.));
+    // Fit width at y = 300 on the last page, whose media box starts at y = 100.
+    assert!(close(links[1].y, 272.));
+    let LinkTarget::Page { page_index, x, y } = links[1].target else {
+        panic!(
+            "expected a link into the document, got {:?}",
+            links[1].target
+        );
+    };
+    assert_eq!((page_index, x), (2, None));
+    assert!(close(y.unwrap(), 892. - 300.));
+    assert_eq!(
+        links[2].target,
+        LinkTarget::Uri("https://example.com/".into())
+    );
+
+    // Links on a page with an offset media box are placed relative to its top too.
+    let links = links_on(2).await.unwrap().unwrap();
+    assert_eq!(links.len(), 1);
+    assert!(close(links[0].x, 100.) && close(links[0].y, 892. - 720.));
+    assert_eq!(
+        links[0].target,
+        LinkTarget::Page {
+            page_index: 0,
+            x: None,
+            y: None
+        }
+    );
+    worker.close(document.id);
+}
+
+#[gpui::test]
+async fn clicking_a_link_scrolls_to_its_target_and_going_back_returns(cx: &mut TestAppContext) {
+    let Some((view, cx)) = open_pdf_bytes(linked_pdf(), cx).await else {
+        return;
+    };
+    cx.simulate_resize(size(px(900.), px(700.)));
+    draw_until_rendered(&view, cx);
+    for _ in 0..200 {
+        draw(cx);
+        let loaded = cx.read(|cx| {
+            matches!(
+                view.read(cx).links.pages.get(&0),
+                Some(PageLinksState::Loaded(_))
+            )
+        });
+        if loaded {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // The window position of a point given in PDF points on the first page.
+    let window_point = |cx: &mut VisualTestContext, x: f32, y: f32| {
+        cx.read(|cx| {
+            let view = view.read(cx);
+            let layout = view.layout.as_ref().unwrap();
+            view.scroll.viewport_bounds().origin - view.scroll.scroll_position()
+                + layout.pages[0].origin
+                + point(px(x * layout.zoom), px(y * layout.zoom))
+        })
+    };
+    let before = cx.read(|cx| view.read(cx).top_anchor().unwrap());
+    assert_eq!(before.page_index, 0);
+
+    // Hovering a link shows a pointing hand.
+    let on_link = window_point(cx, 150., 182.);
+    cx.simulate_mouse_move(on_link, None, gpui::Modifiers::none());
+    cx.read(|cx| assert!(view.read(cx).hovering_link));
+
+    // Clicking the equation link puts its target, page 2 at 392 points, at the top.
+    cx.simulate_click(on_link, gpui::Modifiers::none());
+    draw(cx);
+    cx.read(|cx| {
+        let view = view.read(cx);
+        let anchor = view.top_anchor().unwrap();
+        assert_eq!(anchor.page_index, 1);
+        assert!((anchor.y - 392.).abs() < 1., "scrolled to {anchor:?}");
+    });
+
+    // Going back returns to where the view was before the click.
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.navigate(Arc::new(before), window, cx));
+    });
+    draw(cx);
+    cx.read(|cx| {
+        let anchor = view.read(cx).top_anchor().unwrap();
+        assert_eq!(anchor.page_index, before.page_index);
+        assert!((anchor.y - before.y).abs() < 1.);
     });
 }

@@ -120,3 +120,38 @@ pub fn sample_document() -> Vec<u8> {
     }
     assemble(&objects)
 }
+
+/// Three US Letter pages with links on the first and last page, as LaTeX's hyperref
+/// writes them: a named destination like an equation reference, a direct destination,
+/// a web link, and a link to a page without a position. The last page's media box
+/// starts at y = 100, so its coordinates are offset.
+///
+/// Objects: 1 catalog, 2 pages, 3 contents, 4..6 pages, 7..10 links, 11 named destinations.
+pub fn linked_pdf() -> Vec<u8> {
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R /Names << /Dests 11 0 R >> >>".to_vec(),
+        b"<< /Type /Pages /Kids [4 0 R 5 0 R 6 0 R] /Count 3 >>".to_vec(),
+        stream("", b"0 0 0 rg 72 700 468 20 re f\n"),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 3 0 R \
+           /Annots [7 0 R 8 0 R 9 0 R] >>"
+            .to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 3 0 R >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 100 612 892] /Contents 3 0 R \
+           /Annots [10 0 R] >>"
+            .to_vec(),
+        b"<< /Type /Annot /Subtype /Link /Rect [100 600 200 620] /Border [0 0 0] \
+           /A << /S /GoTo /D (equation.1) >> >>"
+            .to_vec(),
+        b"<< /Type /Annot /Subtype /Link /Rect [100 500 200 520] /Border [0 0 0] \
+           /Dest [6 0 R /FitH 300] >>"
+            .to_vec(),
+        b"<< /Type /Annot /Subtype /Link /Rect [100 400 300 420] /Border [0 0 0] \
+           /A << /S /URI /URI (https://example.com/) >> >>"
+            .to_vec(),
+        b"<< /Type /Annot /Subtype /Link /Rect [100 700 200 720] /Border [0 0 0] \
+           /Dest [4 0 R /XYZ null null null] >>"
+            .to_vec(),
+        b"<< /Names [(equation.1) [5 0 R /XYZ 72 400 null]] >>".to_vec(),
+    ];
+    assemble(&objects)
+}

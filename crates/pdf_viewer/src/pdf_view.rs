@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
@@ -17,7 +18,9 @@ use gpui::{
     Style, Styled, Task, WeakEntity, Window, actions, div, fill, hsla, outline, point, px, size,
 };
 use image::{Frame, RgbaImage};
-use kkpdf_zed::{PdfWorker, RenderTicket, RenderedTile, TileRequest};
+use kkpdf_zed::{
+    DocumentId, LinkTarget, PageLink, PdfWorker, RenderTicket, RenderedTile, TileRequest,
+};
 use language::File as _;
 use project::{Project, git_store::GitStoreEvent};
 use serde::{Deserialize, Serialize};
@@ -27,7 +30,8 @@ use theme_settings::ThemeSettings;
 use ui::{ScrollAxes, Scrollbars, WithScrollbar, prelude::*};
 use util::{ResultExt as _, paths::PathExt};
 use workspace::{
-    ItemId, ItemSettings, Pane, ToolbarItemLocation, Workspace, WorkspaceId, delete_unloaded_items,
+    ItemId, ItemNavHistory, ItemSettings, Pane, ToolbarItemLocation, Workspace, WorkspaceId,
+    delete_unloaded_items,
     invalid_item_view::InvalidItemView,
     item::{HighlightedText, Item, ItemEvent, ProjectItem, SerializableItem, TabContentParams},
 };
@@ -91,6 +95,9 @@ const SERIALIZE_DEBOUNCE: Duration = Duration::from_millis(500);
 const HIGHLIGHT_DURATION: Duration = Duration::from_secs(2);
 /// Space around a highlighted box, in points, so descenders are covered too.
 const HIGHLIGHT_PADDING: f32 = 2.;
+/// How far the mouse may move between pressing and releasing on a link for the
+/// press to count as a click rather than a drag.
+const LINK_CLICK_SLOP: Pixels = px(4.);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TileKey {
@@ -163,6 +170,18 @@ impl TileCache {
     }
 }
 
+enum PageLinksState {
+    Loading { _task: Task<()> },
+    Loaded(Vec<PageLink>),
+}
+
+/// Links of the pages that have been on screen, for one version of the document.
+#[derive(Default)]
+struct PageLinks {
+    generation: u64,
+    pages: HashMap<usize, PageLinksState>,
+}
+
 /// View state persisted across restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SerializedViewState {
@@ -197,6 +216,12 @@ pub struct PdfView {
     /// Boxes shown by a SyncTeX jump until `highlight_task` clears them.
     highlight: Vec<PdfBox>,
     highlight_task: Option<Task<()>>,
+    links: PageLinks,
+    /// Whether the mouse is over a link, which shows a pointing hand.
+    hovering_link: bool,
+    /// A link pressed with the mouse, followed if the button is released close by.
+    pressed_link: Option<(Point<Pixels>, LinkTarget)>,
+    nav_history: Option<ItemNavHistory>,
 }
 
 impl PdfView {
@@ -237,6 +262,10 @@ impl PdfView {
             workspace: None,
             highlight: Vec::new(),
             highlight_task: None,
+            links: PageLinks::default(),
+            hovering_link: false,
+            pressed_link: None,
+            nav_history: None,
         }
     }
 
@@ -429,6 +458,101 @@ impl PdfView {
             .anchor_at(self.scroll.scroll_position() + (window_point - viewport.origin))
     }
 
+    /// Starts reading the links of a page unless they are known or being read.
+    fn request_links(
+        &mut self,
+        page_index: usize,
+        document: DocumentId,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.links.generation != generation {
+            self.links = PageLinks {
+                generation,
+                pages: HashMap::new(),
+            };
+        }
+        if self.links.pages.contains_key(&page_index) {
+            return;
+        }
+        let Some(worker) = PdfWorker::global().log_err() else {
+            return;
+        };
+        let (tx, rx) = oneshot::channel();
+        worker.links(document, page_index, move |result| {
+            tx.send(result).ok();
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let links = rx
+                .await
+                .context("reading links was cancelled")
+                .and_then(|result| result)
+                .with_context(|| format!("failed to read the links on page {}", page_index + 1))
+                .log_err()
+                .unwrap_or_default();
+            this.update(cx, |this, _| {
+                if this.links.generation == generation {
+                    this.links
+                        .pages
+                        .insert(page_index, PageLinksState::Loaded(links));
+                }
+            })
+            .ok();
+        });
+        self.links
+            .pages
+            .insert(page_index, PageLinksState::Loading { _task: task });
+    }
+
+    /// The link under a window position, once the links of its page are known.
+    fn link_at(&self, window_point: Point<Pixels>) -> Option<&PageLink> {
+        let anchor = self.page_point_at(window_point)?;
+        let PageLinksState::Loaded(links) = self.links.pages.get(&anchor.page_index)? else {
+            return None;
+        };
+        links.iter().find(|link| {
+            (link.x..=link.x + link.width).contains(&anchor.x)
+                && (link.y..=link.y + link.height).contains(&anchor.y)
+        })
+    }
+
+    /// Follows a link: scrolls to its target in the document, remembering where the view
+    /// was so that going back returns there, or opens a web address in the browser.
+    fn follow_link(&mut self, target: LinkTarget, cx: &mut Context<Self>) {
+        match target {
+            LinkTarget::Page { page_index, x, y } => {
+                self.push_to_nav_history(cx);
+                let last = self.page_count(cx).saturating_sub(1);
+                self.pending_anchor = Some((
+                    PageAnchor {
+                        page_index: page_index.min(last),
+                        x: x.unwrap_or(0.),
+                        y: y.unwrap_or(0.),
+                    },
+                    point(Pixels::ZERO, PAGE_GAP / 2.),
+                ));
+                self.state_changed(cx);
+                cx.notify();
+            }
+            LinkTarget::Uri(uri) => cx.open_url(&uri),
+        }
+    }
+
+    /// The position at the top of the view, which session restore and going back return to.
+    fn top_anchor(&self) -> Option<PageAnchor> {
+        self.layout.as_ref().and_then(|layout| {
+            layout.anchor_at(self.scroll.scroll_position() + point(Pixels::ZERO, PAGE_GAP / 2.))
+        })
+    }
+
+    fn push_to_nav_history(&mut self, cx: &mut Context<Self>) {
+        if let Some(anchor) = self.top_anchor()
+            && let Some(nav_history) = self.nav_history.as_mut()
+        {
+            nav_history.push(Some(anchor), None, cx);
+        }
+    }
+
     /// Inverse SyncTeX search: opens the source line typeset at a window position.
     fn show_source_at(
         &mut self,
@@ -564,8 +688,24 @@ impl PdfView {
             self.show_source_at(event.position, window, cx);
             return;
         }
+        if event.button == MouseButton::Left {
+            self.pressed_link = self
+                .link_at(event.position)
+                .map(|link| (event.position, link.target.clone()));
+        }
         self.drag_position = Some(event.position);
         cx.notify();
+    }
+
+    fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let pressed_link = self.pressed_link.take();
+        self.end_drag(cx);
+        if let Some((pressed_at, target)) = pressed_link {
+            let moved = event.position - pressed_at;
+            if moved.x.abs() <= LINK_CLICK_SLOP && moved.y.abs() <= LINK_CLICK_SLOP {
+                self.follow_link(target, cx);
+            }
+        }
     }
 
     fn handle_mouse_move(
@@ -575,6 +715,11 @@ impl PdfView {
         cx: &mut Context<Self>,
     ) {
         let Some(previous) = self.drag_position else {
+            let hovering_link = self.link_at(event.position).is_some();
+            if hovering_link != self.hovering_link {
+                self.hovering_link = hovering_link;
+                cx.notify();
+            }
             return;
         };
         // The button can be released outside the window, or while another element
@@ -588,6 +733,7 @@ impl PdfView {
     }
 
     fn end_drag(&mut self, cx: &mut Context<Self>) {
+        self.pressed_link = None;
         if self.drag_position.take().is_some() {
             cx.notify();
         }
@@ -603,12 +749,9 @@ impl PdfView {
     }
 
     fn serialized_state(&self) -> SerializedViewState {
-        let anchor = self.layout.as_ref().and_then(|layout| {
-            layout.anchor_at(self.scroll.scroll_position() + point(Pixels::ZERO, PAGE_GAP / 2.))
-        });
         SerializedViewState {
             zoom_mode: self.zoom_mode,
-            anchor,
+            anchor: self.top_anchor(),
         }
     }
 
@@ -835,6 +978,10 @@ impl PdfView {
         self.tiles.pending.retain(|key, _| wanted.contains(key));
         self.tiles.evict(window);
 
+        for page_index in visible_range {
+            self.request_links(page_index, document.id, generation, cx);
+        }
+
         PagesPaint { pages, border }
     }
 
@@ -1050,6 +1197,8 @@ impl Render for PdfView {
                     .overflow_hidden()
                     .cursor(if is_dragging {
                         gpui::CursorStyle::ClosedHand
+                    } else if self.hovering_link {
+                        gpui::CursorStyle::PointingHand
                     } else {
                         gpui::CursorStyle::Arrow
                     })
@@ -1058,10 +1207,7 @@ impl Render for PdfView {
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
                     .on_mouse_down(MouseButton::Middle, cx.listener(Self::handle_mouse_down))
                     .on_mouse_move(cx.listener(Self::handle_mouse_move))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_drag(cx)),
-                    )
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
                     .on_mouse_up(
                         MouseButton::Middle,
                         cx.listener(|this, _: &MouseUpEvent, _, cx| this.end_drag(cx)),
@@ -1105,6 +1251,32 @@ impl Item for PdfView {
         f: &mut dyn FnMut(gpui::EntityId, &dyn project::ProjectItem),
     ) {
         f(self.pdf_item.entity_id(), self.pdf_item.read(cx))
+    }
+
+    fn set_nav_history(
+        &mut self,
+        nav_history: ItemNavHistory,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        self.nav_history = Some(nav_history);
+    }
+
+    fn navigate(
+        &mut self,
+        data: Arc<dyn Any + Send>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(anchor) = data.downcast_ref::<PageAnchor>().copied() else {
+            return false;
+        };
+        // While going back this lands in the forward history, and vice versa.
+        self.push_to_nav_history(cx);
+        self.pending_anchor = Some((anchor, point(Pixels::ZERO, PAGE_GAP / 2.)));
+        self.state_changed(cx);
+        cx.notify();
+        true
     }
 
     fn added_to_workspace(

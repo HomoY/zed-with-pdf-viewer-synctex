@@ -30,4 +30,7 @@ pub use settings::{DefaultZoomPolicy, PageLayoutMode, PdfViewerSettings};
 pub use ui::{PdfToolbarAction, PdfToolbarState};
 pub use view::{MAX_ZOOM, MIN_ZOOM, PAGE_SPACING_PX, PdfView, ZOOM_STEP};
 pub use watcher::{PdfReloadDebouncer, ViewerStateSnapshot};
-pub use worker::{DocumentId, DocumentInfo, PdfWorker, RenderTicket, RenderedTile, TileRequest};
+pub use worker::{
+    DocumentId, DocumentInfo, LinkTarget, PageLink, PdfWorker, RenderTicket, RenderedTile,
+    TileRequest,
+};

@@ -48,6 +48,7 @@ To use another key, bind `pdf_viewer::ShowInPdf` in your keymap (`zed: open keym
 - Page navigation: previous and next page buttons, arrow keys, Page Up and Page Down, Space, and jumping to a typed page number (Ctrl+G).
 - Live reload: when the PDF changes on disk, for example after LaTeX or Typst recompiles it, the view updates in place and keeps your position.
 - Drag to pan, split panes, and session restore of the page and zoom you were at.
+- Clickable links: links within the document, such as LaTeX references to equations, citations and sections, scroll to their target, and Go Back (Ctrl + - on macOS) returns to where you were; web links open in your browser.
 - Pages always show the document's original colors.
 
 ## Install on macOS
@@ -77,6 +78,7 @@ It does not auto-update itself; new versions appear on the releases page.
 | --- | --- | --- |
 | Jump from the PDF to the LaTeX source | Cmd + click | Ctrl + click |
 | Jump from a LaTeX file to the PDF | Cmd + Alt + J | Ctrl + Alt + J |
+| Back and forward after following a link | Ctrl + - and Ctrl + Shift + - | Ctrl + Alt + - and Ctrl + Alt + Shift + - on Linux, Alt + Left and Alt + Right on Windows |
 | Zoom in and out | Cmd + = and Cmd + - | Ctrl + = and Ctrl + - |
 | Fit width | Cmd + 0 | Ctrl + 0 |
 | Actual size | Cmd + 1 | Ctrl + 1 |

@@ -172,6 +172,15 @@ Unknown JSON fields are ignored, so older saved states keep loading.
 - **Dev release channel for the app.**
   Release builds of this fork use Zed's `dev` channel so Zed's auto-updater never replaces them with stock Zed, with their own bundle identifier so they install next to the official app.
 
+### Links
+
+`PdfWorker::links` reads the links of a page with Pdfium: their rectangles, and either a position in the document (resolving named destinations, which LaTeX's hyperref uses for equations, citations and sections) or a URI.
+The worker converts both from the PDF's own coordinates (origin at the bottom left of the media box) to the top-left page points the viewer uses, with `FPDF_PageToDevice`, so offset media boxes come out right.
+`PdfView` asks for the links of each visible page once per document version and keeps them in `links`.
+Hovering a link shows a pointing hand; pressing and releasing the left button on it without dragging follows it.
+A position in the document is scrolled to the top of the view, after the current position is pushed to the pane's navigation history; `Item::navigate` brings a recorded position back, so Zed's Go Back and Go Forward move between them.
+URIs open in the browser.
+
 ### SyncTeX
 
 Jumping between LaTeX sources and the PDF runs the `synctex` command-line tool from the user's TeX distribution, found on `PATH` or in the usual TeX install directories, rather than parsing `.synctex.gz` files in Rust.
@@ -190,6 +199,6 @@ The search for PDFs then uses the worktree listing (`ProjectFiles`) instead of t
 
 - No text selection, copy, or search inside PDFs yet.
   The engine already extracts text with bounding boxes (`PdfiumEngine::extract_document_details`), which is the starting point.
-- No outline or thumbnail sidebar, no clickable links.
+- No outline or thumbnail sidebar.
 - In remote projects every reload downloads the whole file again.
 - Only macOS builds are published; Linux and Windows builds compile the same code but are untested.
